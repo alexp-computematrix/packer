@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/hashicorp/hcp-sdk-go/clients/cloud-packer-service/stable/2021-04-30/models"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
@@ -11,6 +12,10 @@ import (
 	packerregistry "github.com/hashicorp/packer/internal/registry"
 	"github.com/mitchellh/mapstructure"
 )
+
+// HeartbeatPeriod dictates how often a heartbeat is sent to HCP to signal a
+// build is still alive.
+const HeartbeatPeriod = 2 * time.Minute
 
 type RegistryBuilder struct {
 	Name                      string
@@ -49,6 +54,31 @@ func (b *RegistryBuilder) Run(ctx context.Context, ui packersdk.Ui, hook packers
 	if err := b.ArtifactMetadataPublisher.UpdateBuildStatus(ctx, b.Name, models.HashicorpCloudPackerBuildStatusRUNNING); err != nil {
 		log.Printf("[TRACE] failed to update HCP Packer registry status for %q: %s", b.Name, err)
 	}
+
+	go func() {
+		log.Printf("[TRACE] starting heartbeats for %q", b.Name)
+
+		tick := time.NewTicker(HeartbeatPeriod)
+
+		for {
+			select {
+			case <-ctx.Done():
+				tick.Stop()
+				return
+			case <-tick.C:
+				err := b.ArtifactMetadataPublisher.UpdateBuildStatus(
+					ctx,
+					b.Name,
+					models.HashicorpCloudPackerBuildStatusRUNNING,
+				)
+				if err != nil {
+					log.Printf("[ERROR] failed to send heartbeat for build %q: %s", b.Name, err)
+				} else {
+					log.Printf("[TRACE] sent heartbeat for %q", b.Name)
+				}
+			}
+		}
+	}()
 
 	ui.Say(fmt.Sprintf("Publishing build details for %s to the HCP Packer registry", b.Name))
 	artifact, err := b.Builder.Run(ctx, ui, hook)
